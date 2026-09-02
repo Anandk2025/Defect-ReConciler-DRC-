@@ -1,0 +1,130 @@
+# Fill in the blanks below, then run `python -m src.cli compare`.
+# See README.md for how to find each value.
+
+rally:
+  base_url: "https://rally1.rallydev.com"   # change if you're on an on-prem/private Rally instance
+  project: "IT: Testing"                     # Rally project name to pull defects from
+  # A defect is "open" if State != this value.
+  not_state: "Closed"
+  # Limit to defects owned by this team (matches Rally's "Owner" DisplayName exactly).
+  # Leave empty to include all owners in the project.
+  owners:
+    - "Mohamed Dhapan Asadullaha.n"
+    - "Paras Sharma"
+    - "Suraj Manandhar"
+    - "Mohit Tiwari"
+    - "Manish Sahu"
+    - "Anand Babu K"
+    - "Niraj Khisty"
+  # Rally's saved view matching this project/owner/state scope, for the
+  # "Filter" link next to the Rally open defects count.
+  filter_url: "https://rally1.rallydev.com/#/730865758999d/defects?view=43b15f7f-a99b-4375-a16d-c5610103dc82"
+  # Defect.State's allowed values, per Rally's own AttributeDefinition schema.
+  state_values:
+    - "Submitted"
+    - "Open"
+    - "In Progress"
+    - "Fixed"
+    - "Failed"
+    - "Closed"
+  # Applied to the Rally defect right after its ZDR ticket is created.
+  # {zdr_key} is substituted with the new ticket's key.
+  on_zdr_created:
+    comment_template: "{zdr_key} has been created for Zinnia analysis."
+    state: "In Progress"
+    schedule_state: "In-Progress"
+
+zdr:
+  site: "zinnia.atlassian.net"
+  project_key: "ZDR"
+  issue_type_id: "11266"          # "Submit a request or incident" — the only defect-capable issue type in ZDR
+  external_id_field: "customfield_13901"   # "External Issue ID A" — stores the Rally FormattedID (e.g. DE1234)
+  qa_complete_date_field: "customfield_15254"   # "QA Complete Date" — shown as "ZDR Fix ETA" in the matched table
+  # Appended to "project = ZDR AND ..." verbatim. Scopes to the Farmers Product
+  # Launches release and restricts to tickets already carrying a Rally-style
+  # (DE*) external ID. No status filter here — matching against Rally defects
+  # uses this scope alone, so an already-linked ticket is never mistaken for
+  # "missing" just because of its current status.
+  jql_scope: >-
+    "Defect Reporting Project Farmers[Dropdown]" = "Farmers Product Launches 2025 OA7540"
+    AND "External Issue ID A[Short text]" ~ "DE*"
+  # Statuses excluded ONLY for the "ZDR open" count/badges — not for matching.
+  jql_excluded_statuses:
+    - "Done"
+    - "Canceled"
+    - "Cancelled"
+    - "Pending Client Info"
+    - "Pending Client Sign Off"
+    - "PENDING APPROVAL TO CLOSE"
+  jql_order_by: "cf[13508] ASC"
+  # Statuses excluded from MATCHING too, unlike the list above — these are
+  # genuinely terminal/dead (e.g. auto-cancelled), so a Rally defect linked
+  # only to a ticket in one of these statuses should count as missing a ZDR
+  # ticket, not matched.
+  matching_excluded_statuses:
+    - "Done"
+    - "Canceled"
+    - "Cancelled"
+  # Jira issue navigator link for this exact scope + status exclusion, for the
+  # "Filter" link next to the ZDR open defects count.
+  filter_url: "https://zinnia.atlassian.net/issues/?jql=project%20%3D%20ZDR%20AND%20%22Defect%20Reporting%20Project%20Farmers%5BDropdown%5D%22%20%3D%20%22Farmers%20Product%20Launches%202025%20OA7540%22%20AND%20%22External%20Issue%20ID%20A%5BShort%20text%5D%22%20~%20%22DE%2A%22%20AND%20status%20not%20in%20%28Done%2C%20Canceled%2C%20Cancelled%2C%20%22Pending%20Client%20Info%22%2C%20%22Pending%20Client%20Sign%20Off%22%2C%20%22PENDING%20APPROVAL%20TO%20CLOSE%22%29%20ORDER%20BY%20cf%5B13508%5D%20ASC"
+
+  # Fields set on every newly created ZDR ticket, looked up via Jira's API
+  # (organization search / request-type search) for this Farmers scope:
+  create_defaults:
+    client_field: "customfield_15215"       # "Client/s"
+    client_option_id: "24684"               # value "Farmers"
+    organization_field: "customfield_12200" # "Organizations"
+    organization_id: 319                    # "Farmers New World Life - Zinnia Defect Reporting"
+    request_type_field: "customfield_15205" # "Request Type" — set via a follow-up edit, not on create
+    request_type_id: "1320"                 # "Submit a Farmers Project Defect"
+    farmers_project_field: "customfield_17839" # "Defect Reporting Project Farmers"
+    farmers_project_option_id: "25214"         # value "Farmers Product Launches 2025 OA7540"
+    # "Ticket Classification" is normally filled in by a human on Rally's own
+    # portal form. Leaving it blank makes a ZDR project automation rule treat
+    # the ticket as an incomplete submission and auto-cancel it as "User
+    # Error" a few minutes later — set it explicitly to avoid that.
+    classification_field: "customfield_18140"
+    classification_option_id: "25393"           # value "Defect"
+    # "Defect Severity Farmers" — Rally's Defect.Severity values match these
+    # option labels exactly, so it's a direct name lookup, no translation.
+    severity_field: "customfield_18664"
+    severity_options:
+      Showstopper: "26697"
+      Critical: "26698"
+      High: "26699"
+      Medium: "26700"
+      Low: "26701"
+    # "Environment Found" — Rally's Defect.Environment values don't line up
+    # 1:1 with ZDR's option labels, so this maps each Rally value explicitly.
+    # "Regression" has no obvious ZDR equivalent; it falls back to "Other".
+    environment_field: "customfield_14502"
+    environment_options:
+      Development: "14003"
+      Production: "14007"
+      "Test - QA1": "14004"
+      "Test - QA2": "19743"
+      Regression: "14008"   # -> "Other"
+
+matching:
+  # How a Rally FormattedID (e.g. "DE1234") is expected to appear in ZDR's external_id_field.
+  # Set a prefix/suffix here only if your team adopts one; default is the raw FormattedID.
+  rally_id_prefix: ""
+
+sync_check:
+  # "Defect Status Check" (Check sync button): while Rally is in one of these
+  # states, the linked ZDR ticket shouldn't be sitting in a blocking status —
+  # that combination means the two systems have drifted out of sync.
+  rally_statuses_requiring_zdr_progress:
+    - "Open"
+    - "Failed"
+  zdr_blocking_statuses:
+    - "Pending Client Info"
+    - "Pending Approval to Close"
+    - "Cancelled"
+
+ai:
+  # Used for the "Comments Sync Status" check — compares the latest Rally
+  # comment against the latest ZDR comment and judges whether they still
+  # reflect the same context. Requires ANTHROPIC_API_KEY in .env.
+  model: "claude-haiku-4-5-20251001"
