@@ -1,16 +1,53 @@
+import hmac
 import re
+from datetime import timedelta
+from urllib.parse import urlencode
 
-from flask import Flask, jsonify, redirect, request
+from flask import Flask, jsonify, redirect, request, session
 
 from . import config
 from .ai_sync import check_comment_sync
+from .comment_sync import notice_for_results, sync_matched_pairs
 from .pipeline import create_zdr_from_rally, run_comparison
 from .rally_client import RallyClient
-from .report import build_html
+from .report import build_html, build_login_html
 from .sync_checks import check_defect_status, check_fix_eta
 from .zdr_client import ZDRClient, extract_external_client_version
 
 app = Flask(__name__)
+app.secret_key = config.DRC_SECRET_KEY or "dev-only-key-set-DRC_SECRET_KEY-in-.env-before-sharing"
+app.permanent_session_lifetime = timedelta(days=30)
+
+_PUBLIC_PATHS = {"/login"}
+
+
+@app.before_request
+def _require_login():
+    if not config.DRC_ACCESS_PASSWORD or request.path in _PUBLIC_PATHS:
+        return None
+    if session.get("authenticated"):
+        return None
+    return redirect("/login")
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if not config.DRC_ACCESS_PASSWORD:
+        return redirect("/")
+    if request.method == "POST":
+        password = request.form.get("password", "")
+        if hmac.compare_digest(password, config.DRC_ACCESS_PASSWORD):
+            session["authenticated"] = True
+            session.permanent = bool(request.form.get("remember"))
+            return redirect("/")
+        return build_login_html(error="Incorrect password."), 401
+    return build_login_html()
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect("/login")
 
 # Persists for the life of the server process so the "Created" state next to
 # a row survives a plain page reload, not just the immediate redirect — Jira's
@@ -62,6 +99,17 @@ def index():
         if request.args.get("error"):
             message += " " + request.args["error"]
         notice = ("success", message)
+    elif request.args.get("created_all") is not None:
+        created_n = request.args.get("created_all", "0")
+        failed_n = request.args.get("failed", "0")
+        ids = request.args.get("ids", "")
+        message = f"Created {created_n} ZDR ticket(s)"
+        if ids:
+            message += f" ({ids})"
+        message += "."
+        if request.args.get("error"):
+            message += " " + request.args["error"]
+        notice = ("error" if failed_n not in ("", "0") else "success", message)
     elif request.args.get("error"):
         notice = ("error", request.args["error"])
 
@@ -70,16 +118,41 @@ def index():
     except SystemExit as e:
         return f"<pre>{e}</pre>", 500
     except Exception as e:
-        return f"<pre>Failed to fetch comparison: {e}</pre>", 500
+        message = str(e)
+        if "401" in message and "rallydev.com" in message:
+            return (
+                "<pre>Rally session has expired.\n\n"
+                "Whoever's on refresh duty: log into Rally in a browser, copy the "
+                "ZSESSIONID and JSESSIONID cookies from DevTools, and update "
+                "RALLY_ZSESSIONID / RALLY_JSESSIONID in .env, then restart the server.</pre>",
+                503,
+            )
+        return f"<pre>Failed to fetch comparison: {message}</pre>", 500
     _reconcile_recently_created(result)
+
+    if request.args.get("refresh"):
+        try:
+            sync_notice = notice_for_results(sync_matched_pairs(result))
+        except Exception as e:
+            sync_notice = ("error", f"Failed to sync Rally discussions to ZDR: {e}")
+        if sync_notice:
+            if notice:
+                notice = (
+                    "error" if notice[0] == "error" or sync_notice[0] == "error" else "success",
+                    notice[1] + " " + sync_notice[1],
+                )
+            else:
+                notice = sync_notice
+
     return build_html(
         result,
         len(rally_defects),
         len(zdr_defects),
-        refresh_url="/",
+        refresh_url="/?refresh=1",
         enable_actions=True,
         notice=notice,
         created_map=_recently_created,
+        show_logout=bool(config.DRC_ACCESS_PASSWORD),
     )
 
 
@@ -102,6 +175,46 @@ def create_zdr(rally_id):
             f"&error=Some attachments failed to copy: {'; '.join(attach_errors)}"
         )
     return redirect(f"/?created={zdr_key}&rally_id={rally_id}&attached={attached}")
+
+
+@app.route("/create-all-zdrs", methods=["POST"])
+def create_all_zdrs():
+    try:
+        _, _, result = run_comparison()
+        _reconcile_recently_created(result)
+        missing = [d for d in result["missing_in_zdr"] if d["id"] not in _recently_created]
+        if not missing:
+            return redirect("/?error=There are no missing Rally defects to create ZDR tickets for.")
+        rally_client = RallyClient()
+        zdr_client = ZDRClient()
+        created = []
+        failures = []
+        attach_notes = []
+        for defect in missing:
+            try:
+                zdr_key, attached, attach_errors = create_zdr_from_rally(
+                    defect, rally_client=rally_client, zdr_client=zdr_client
+                )
+                _recently_created[defect["id"]] = zdr_key
+                created.append(f"{defect['id']}→{zdr_key}")
+                if attach_errors:
+                    attach_notes.append(f"{defect['id']}: {'; '.join(attach_errors)}")
+            except Exception as e:
+                failures.append(f"{defect['id']}: {e}")
+    except Exception as e:
+        return redirect(f"/?error=Failed to create ZDR tickets: {e}")
+
+    params = {"created_all": str(len(created)), "failed": str(len(failures))}
+    if created:
+        params["ids"] = ", ".join(created)
+    errors = []
+    if attach_notes:
+        errors.append("Some attachments failed to copy: " + "; ".join(attach_notes))
+    if failures:
+        errors.append("Failed: " + "; ".join(failures))
+    if errors:
+        params["error"] = " ".join(errors)
+    return redirect("/?" + urlencode(params))
 
 
 @app.route("/api/comments/rally/<rally_id>")
@@ -269,7 +382,7 @@ def zdr_update_date(zdr_key):
 
 
 def main():
-    app.run(host="127.0.0.1", port=5050, debug=False)
+    app.run(host="0.0.0.0", port=5050, debug=False)
 
 
 if __name__ == "__main__":

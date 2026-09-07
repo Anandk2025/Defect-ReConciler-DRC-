@@ -128,3 +128,8 @@ ai:
   # comment against the latest ZDR comment and judges whether they still
   # reflect the same context. Requires ANTHROPIC_API_KEY in .env.
   model: "claude-haiku-4-5-20251001"
+
+comment_sync:
+  # Copied into every matched ZDR (ZDR available for Rally defects) on Refresh.
+  tag_line: "Latest Comments from Rally Posted at:"
+  other_team: "FNWL Team"

@@ -35,12 +35,18 @@ ZDR_MATCHING_EXCLUDED_STATUSES = _cfg["zdr"].get("matching_excluded_statuses") o
 ZDR_CREATE_DEFAULTS = _cfg["zdr"]["create_defaults"]
 ZDR_FILTER_URL = _cfg["zdr"].get("filter_url") or ""
 
+DRC_ACCESS_PASSWORD = os.environ.get("DRC_ACCESS_PASSWORD", "")
+DRC_SECRET_KEY = os.environ.get("DRC_SECRET_KEY", "")
+
 RALLY_ID_PREFIX = _cfg["matching"].get("rally_id_prefix") or ""
 
 SYNC_CHECK_RALLY_STATUSES = _cfg.get("sync_check", {}).get("rally_statuses_requiring_zdr_progress") or []
 SYNC_CHECK_ZDR_BLOCKING_STATUSES = _cfg.get("sync_check", {}).get("zdr_blocking_statuses") or []
 
 AI_MODEL = _cfg.get("ai", {}).get("model") or "claude-haiku-4-5-20251001"
+
+COMMENT_SYNC_TAG = (_cfg.get("comment_sync") or {}).get("tag_line") or "Latest Comments from Rally Posted at:"
+COMMENT_SYNC_OTHER_TEAM = (_cfg.get("comment_sync") or {}).get("other_team") or "FNWL Team"
 
 
 def require_credentials():

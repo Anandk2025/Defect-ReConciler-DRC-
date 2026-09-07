@@ -203,3 +203,29 @@ class RallyClient:
             "author": (item.get("User") or {}).get("_refObjectName"),
             "created": item.get("CreationDate"),
         }
+
+    def list_comments(self, formatted_id):
+        """All Rally discussion posts for a defect, oldest first."""
+        posts = []
+        params = {
+            "query": f'(Artifact.FormattedID = "{formatted_id}")',
+            "fetch": "Text,User,CreationDate",
+            "order": "CreationDate ASC",
+            "pagesize": 200,
+            "start": 1,
+        }
+        while True:
+            data = self._get("conversationpost", params=params)
+            result = data["QueryResult"]
+            for item in result["Results"]:
+                posts.append(
+                    {
+                        "text": _html_to_text(item.get("Text")),
+                        "author": (item.get("User") or {}).get("_refObjectName"),
+                        "created": item.get("CreationDate"),
+                    }
+                )
+            if result["StartIndex"] + result["PageSize"] > result["TotalResultCount"]:
+                break
+            params["start"] = result["StartIndex"] + result["PageSize"]
+        return posts

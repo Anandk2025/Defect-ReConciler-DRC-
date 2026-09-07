@@ -42,6 +42,19 @@ def _adf_to_text(node):
     return joined + ("\n" if node.get("type") == "paragraph" else "")
 
 
+def _comment_adf_body(text, heading=None):
+    content = []
+    if heading:
+        content.append(
+            {
+                "type": "paragraph",
+                "content": [{"type": "text", "text": heading, "marks": [{"type": "strong"}]}],
+            }
+        )
+    content.extend(_text_to_adf(text))
+    return {"type": "doc", "version": 1, "content": content}
+
+
 class ZDRClient:
     def __init__(self):
         self.base_url = f"https://{config.ZDR_SITE}/rest/api/3"
@@ -219,28 +232,54 @@ class ZDRClient:
         }
 
     def get_latest_comment(self, issue_key):
-        resp = requests.get(
-            f"{self.base_url}/issue/{issue_key}/comment",
-            auth=self.auth,
-            params={"maxResults": 1, "orderBy": "-created"},
-        )
-        resp.raise_for_status()
-        comments = resp.json().get("comments") or []
-        if not comments:
-            return None
-        c = comments[0]
-        return {
-            "text": _adf_to_text(c.get("body")).strip(),
-            "author": (c.get("author") or {}).get("displayName"),
-            "created": c.get("created"),
-        }
+        comments = self.list_comments(issue_key, max_results=1)
+        return comments[0] if comments else None
 
-    def add_comment(self, issue_key, text):
+    def list_comments(self, issue_key, max_results=100):
+        comments = []
+        start_at = 0
+        page_size = min(max_results, 100)
+        while len(comments) < max_results:
+            resp = requests.get(
+                f"{self.base_url}/issue/{issue_key}/comment",
+                auth=self.auth,
+                params={"startAt": start_at, "maxResults": page_size, "orderBy": "-created"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            page = data.get("comments") or []
+            for c in page:
+                comments.append(
+                    {
+                        "id": c.get("id"),
+                        "text": _adf_to_text(c.get("body")).strip(),
+                        "author": (c.get("author") or {}).get("displayName"),
+                        "created": c.get("created"),
+                    }
+                )
+                if len(comments) >= max_results:
+                    break
+            start_at += len(page)
+            if start_at >= data.get("total", 0) or not page:
+                break
+        return comments
+
+    def add_comment(self, issue_key, text, heading=None):
         resp = requests.post(
             f"{self.base_url}/issue/{issue_key}/comment",
-            json={"body": {"type": "doc", "version": 1, "content": _text_to_adf(text)}},
+            json={"body": _comment_adf_body(text, heading=heading)},
             auth=self.auth,
             headers=self.headers,
         )
         if not resp.ok:
             raise RuntimeError(f"Jira rejected comment ({resp.status_code}): {resp.text}")
+
+    def update_comment(self, issue_key, comment_id, text, heading=None):
+        resp = requests.put(
+            f"{self.base_url}/issue/{issue_key}/comment/{comment_id}",
+            json={"body": _comment_adf_body(text, heading=heading)},
+            auth=self.auth,
+            headers=self.headers,
+        )
+        if not resp.ok:
+            raise RuntimeError(f"Jira rejected comment update ({resp.status_code}): {resp.text}")

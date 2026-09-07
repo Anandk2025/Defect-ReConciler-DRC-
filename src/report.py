@@ -151,7 +151,7 @@ def _matched_row(m, enable_comments):
 <span class="uc-link" data-direction="to-zdr" data-rally-id="{_esc(rally['id'])}" data-zdr-key="{_esc(first_key)}" title="Copy Rally's latest comment into ZDR">To ZDR</span>
 <span class="uc-link" data-direction="to-rally" data-rally-id="{_esc(rally['id'])}" data-zdr-key="{_esc(first_key)}" title="Fetch External Client Version from ZDR's latest comment and post it to Rally">To Rally</span>
 </td>"""
-        sync_cell = f"""<td class="nowrap">
+        sync_cell = f"""<td>
 <button type="button" class="link-btn sync-check-btn" data-rally-id="{_esc(rally['id'])}" data-zdr-key="{_esc(first_key)}">Check sync</button>
 </td>"""
     status_cell = _editable_status_badge(first_key, status) if enable_comments and zdr else _status_badge(status)
@@ -166,7 +166,12 @@ def _matched_row(m, enable_comments):
         if enable_comments
         else _date_display(rally.get("target_date"))
     )
-    return f"""<tr>
+    row_class = "matched-row"
+    row_title = ""
+    if (rally.get("state") or "") == "Open":
+        row_class += " row-rally-open"
+        row_title = ' title="ZDR ticket exists, but Rally status is still Open"'
+    return f"""<tr class="{row_class}"{row_title}>
 <td class="mono nowrap">{_dot('#2F855A')}{_rally_link(rally)}</td>
 <td class="mono nowrap"><a href="https://{config.ZDR_SITE}/browse/{_esc(first_key)}">{_esc(keys)}</a></td>
 <td>{state_cell}</td>
@@ -216,8 +221,68 @@ def _all_row(rally, zdr_list, enable_actions, created_map):
 </tr>"""
 
 
+def build_login_html(error=None):
+    error_html = (
+        f'<p style="color:#C0392B;font-size:13px;font-weight:500;margin:0 0 16px;text-align:center;">{_esc(error)}</p>'
+        if error
+        else ""
+    )
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Defect ReConciler (DRC)</title>
+<link rel="icon" type="image/svg+xml" href="{_FAVICON_DATA_URI}">
+<style>
+* {{ box-sizing:border-box; }}
+body {{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#F7F5F2;color:{_TEXT};margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:2rem;}}
+.login-wrap {{width:100%;max-width:380px;text-align:center;}}
+.app-icon {{width:48px;height:48px;border-radius:12px;background:linear-gradient(135deg,{_ORANGE},#FF9142);display:inline-flex;align-items:center;justify-content:center;box-shadow:0 2px 6px rgba(244,108,0,0.35);margin-bottom:14px;}}
+h1 {{font-size:20px;font-weight:600;margin:0 0 4px;letter-spacing:-.01em;}}
+.tagline {{font-size:13px;color:{_TEXT_DIM};margin:0 0 28px;}}
+.card {{background:#fff;border:1px solid {_BORDER};border-radius:14px;padding:2rem 1.75rem;box-shadow:0 1px 2px rgba(23,23,23,0.04);text-align:left;}}
+.card h2 {{font-size:17px;font-weight:600;margin:0 0 4px;text-align:center;}}
+.card p.sub {{font-size:13px;color:{_TEXT_DIM};margin:0 0 22px;text-align:center;}}
+label {{display:block;font-size:12px;font-weight:600;color:{_TEXT_DIM};margin-bottom:6px;}}
+input[type=password] {{width:100%;padding:10px 12px;border:1px solid {_BORDER};border-radius:8px;font-size:14px;margin-bottom:16px;}}
+input[type=password]:focus {{outline:none;border-color:{_ORANGE};}}
+.remember {{display:flex;align-items:center;gap:8px;font-size:13px;color:{_TEXT_DIM};margin-bottom:20px;}}
+button.submit {{width:100%;border:none;border-radius:999px;background:{_ORANGE};color:#fff;padding:11px 20px;font-size:14px;font-weight:600;cursor:pointer;}}
+button.submit:hover {{background:#DE6300;}}
+.footer {{font-size:11px;color:{_TEXT_DIM};margin-top:24px;}}
+</style>
+</head>
+<body>
+<div class="login-wrap">
+  <div class="app-icon">{_ICON_SVG}</div>
+  <h1>Defect ReConciler (DRC)</h1>
+  <p class="tagline">Zinnia Defect Management (ZDR) &harr; External Defect Management (Rally)</p>
+  <div class="card">
+    <h2>Welcome back</h2>
+    <p class="sub">Enter the shared team password to continue</p>
+    {error_html}
+    <form method="post" action="/login">
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" autofocus required>
+      <label class="remember"><input type="checkbox" name="remember" value="1" style="width:auto;margin:0;"> Remember me</label>
+      <button type="submit" class="submit">Log In</button>
+    </form>
+  </div>
+  <p class="footer">Zinnia internal tool</p>
+</div>
+</body>
+</html>"""
+
+
 def build_html(
-    result, rally_count, zdr_count, refresh_url=None, enable_actions=False, notice=None, created_map=None
+    result,
+    rally_count,
+    zdr_count,
+    refresh_url=None,
+    enable_actions=False,
+    notice=None,
+    created_map=None,
+    show_logout=False,
 ):
     missing_rows = "".join(_missing_row(d, enable_actions, created_map) for d in result["missing_in_zdr"])
     matched_rows = "".join(_matched_row(m, enable_actions) for m in result["matched"])
@@ -232,8 +297,31 @@ def build_html(
     refresh_button = (
         f'<button class="cta" onclick="location.href=\'{refresh_url}\'">Refresh</button>' if refresh_url else ""
     )
-    action_header = "<th>Action</th>" if enable_actions else ""
-    action_col = '<col style="width:110px;">' if enable_actions else ""
+    logout_link = (
+        '<a href="/logout" style="float:right;margin-right:16px;margin-top:9px;font-size:13px;font-weight:600;">'
+        "Log out</a>"
+        if show_logout
+        else ""
+    )
+    pending_create_n = 0
+    if enable_actions:
+        pending_create_n = sum(
+            1 for d in result["missing_in_zdr"] if not (created_map and created_map.get(d["id"]))
+        )
+    if enable_actions and pending_create_n:
+        action_header = (
+            "<th>Action<br>"
+            '<form method="post" action="/create-all-zdrs" class="create-all-zdrs-form" '
+            f'data-count="{pending_create_n}" style="margin:4px 0 0;display:block;">'
+            '<button type="submit" class="link-btn" '
+            'style="font-size:11px;text-transform:none;letter-spacing:0;font-weight:600;white-space:nowrap;">'
+            "Create All ZDRs</button></form></th>"
+        )
+    elif enable_actions:
+        action_header = "<th>Action</th>"
+    else:
+        action_header = ""
+    action_col = '<col style="width:160px;">' if enable_actions else ""
     comments_header = "<th>Latest comments</th>" if enable_actions else ""
     comments_col = '<col style="width:150px;">' if enable_actions else ""
     update_comments_header = "<th>Update comments</th>" if enable_actions else ""
@@ -246,7 +334,7 @@ def build_html(
         if enable_actions
         else ""
     )
-    sync_col = '<col style="width:340px;">' if enable_actions else ""
+    sync_col = '<col style="width:420px;">' if enable_actions else ""
     notice_html = ""
     if notice:
         kind, message = notice
@@ -288,10 +376,12 @@ h2 {{font-size:15px;font-weight:600;margin:0 0 4px;color:{_TEXT};}}
 .tab-btn.active {{background:{_ORANGE};border-color:{_ORANGE};color:#fff;}}
 .cta {{border:none;border-radius:999px;background:{_ORANGE};color:#fff;padding:9px 20px;font-size:13px;font-weight:600;cursor:pointer;float:right;}}
 .cta:hover {{background:#DE6300;}}
-table {{width:100%;border-collapse:collapse;table-layout:fixed;background:#fff;max-width:1720px;}}
+table {{border-collapse:collapse;table-layout:fixed;background:#fff;width:max-content;min-width:100%;}}
 th {{text-align:left;padding:10px 8px;font-size:11px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;color:{_TEXT_DIM};border-bottom:1px solid {_BORDER};background:#fff;position:sticky;top:0;z-index:1;}}
 td {{padding:10px 8px;font-size:13px;border-bottom:1px solid {_BORDER};}}
 tr:hover td {{background:#FAF8F5;}}
+tr.row-rally-open td {{background:#FDECEC;}}
+tr.row-rally-open:hover td {{background:#F8D4D4;}}
 .mono {{font-family:ui-monospace,monospace;font-size:12px;}}
 .nowrap {{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}}
 .dim {{color:{_TEXT_DIM};}}
@@ -300,11 +390,12 @@ tr:hover td {{background:#FAF8F5;}}
 .dot {{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:7px;vertical-align:middle;}}
 a {{color:{_ORANGE};text-decoration:none;}}
 a:hover {{text-decoration:underline;}}
-.panel {{overflow-x:scroll;overflow-y:auto;max-width:1720px;max-height:640px;background:#fff;border:1px solid {_BORDER};border-radius:12px;padding:4px 4px 0;box-shadow:0 1px 2px rgba(23,23,23,0.04);scrollbar-width:thin;}}
-.panel::-webkit-scrollbar {{height:11px;width:11px;}}
-.panel::-webkit-scrollbar-track {{background:#F7F5F2;}}
-.panel::-webkit-scrollbar-thumb {{background:#D8D3C9;border-radius:6px;border:2px solid #F7F5F2;}}
-.panel::-webkit-scrollbar-thumb:hover {{background:#C7C1B5;}}
+.panel {{width:100%;max-width:100%;overflow-x:scroll;overflow-y:auto;max-height:640px;background:#fff;border:1px solid {_BORDER};border-radius:12px;padding:4px 4px 8px;box-shadow:0 1px 2px rgba(23,23,23,0.04);scrollbar-gutter:stable;scrollbar-width:auto;}}
+.panel::-webkit-scrollbar {{height:14px;width:12px;}}
+.panel::-webkit-scrollbar-track {{background:#EFEBE4;border-radius:8px;}}
+.panel::-webkit-scrollbar-thumb {{background:#C7C1B5;border-radius:8px;border:2px solid #EFEBE4;}}
+.panel::-webkit-scrollbar-thumb:hover {{background:#A8A296;}}
+.panel::-webkit-scrollbar-corner {{background:#EFEBE4;}}
 .link-btn {{background:none;border:none;color:{_ORANGE};font-size:13px;font-weight:500;cursor:pointer;padding:0;}}
 .link-btn:hover {{text-decoration:underline;}}
 .link-btn:disabled {{color:{_TEXT_DIM};cursor:default;text-decoration:none;}}
@@ -343,6 +434,7 @@ a:hover {{text-decoration:underline;}}
     </div>
   </div>
   {refresh_button}
+  {logout_link}
 </div>
 {notice_html}
 
@@ -383,7 +475,7 @@ a:hover {{text-decoration:underline;}}
   </table>
 </div>
 <div class="panel" data-panel="matched" style="display:none;">
-  <table>
+  <table style="min-width:1860px;">
     <colgroup><col style="width:90px;"><col style="width:100px;"><col style="width:130px;"><col style="width:150px;"><col style="width:110px;"><col style="width:110px;"><col style="width:140px;"><col style="width:180px;">{comments_col}{update_comments_col}{sync_col}</colgroup>
     <thead><tr><th>Rally id</th><th>ZDR key</th><th>Rally status</th><th>ZDR status</th><th>ZDR fix ETA</th><th>Rally fix ETA</th><th>Owner</th><th>Summary</th>{comments_header}{update_comments_header}{sync_header}</tr></thead>
     <tbody>{matched_rows}</tbody>
@@ -400,6 +492,13 @@ document.querySelectorAll('.tab-btn').forEach(function(b) {{
     b.classList.add('active');
   }});
 }});
+document.querySelectorAll('.panel').forEach(function(p) {{
+  p.addEventListener('wheel', function(e) {{
+    if (!e.shiftKey || p.scrollWidth <= p.clientWidth) {{ return; }}
+    e.preventDefault();
+    p.scrollLeft += e.deltaY;
+  }}, {{passive: false}});
+}});
 document.querySelectorAll('.create-zdr-form').forEach(function(form) {{
   form.addEventListener('submit', function(e) {{
     if (!confirm('Create a ZDR ticket for ' + form.getAttribute('data-rally-id') + '?')) {{
@@ -409,6 +508,19 @@ document.querySelectorAll('.create-zdr-form').forEach(function(form) {{
     var btn = form.querySelector('button');
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span>Creating...';
+  }});
+}});
+document.querySelectorAll('.create-all-zdrs-form').forEach(function(form) {{
+  form.addEventListener('submit', function(e) {{
+    var n = form.getAttribute('data-count');
+    if (!confirm('Create ZDR tickets for all ' + n + ' missing Rally defects?')) {{
+      e.preventDefault();
+      return;
+    }}
+    document.querySelectorAll('.create-all-zdrs-form button, .create-zdr-form button').forEach(function(btn) {{
+      btn.disabled = true;
+    }});
+    form.querySelector('button').innerHTML = '<span class="spinner"></span>Creating all...';
   }});
 }});
 (function() {{
@@ -740,6 +852,16 @@ document.addEventListener('change', function(e) {{
       }}
       td.innerHTML = '';
       td.appendChild(rallyStateBadgeHtml(rallyId, data.state));
+      var tr = td.closest('tr');
+      if (tr && tr.classList.contains('matched-row')) {{
+        if (data.state === 'Open') {{
+          tr.classList.add('row-rally-open');
+          tr.title = 'ZDR ticket exists, but Rally status is still Open';
+        }} else {{
+          tr.classList.remove('row-rally-open');
+          tr.removeAttribute('title');
+        }}
+      }}
     }})
     .catch(function(e) {{ td.innerHTML = '<span style="color:#C0392B;font-size:12px;">Update failed: ' + e + '</span>'; }});
 }});
