@@ -25,11 +25,22 @@ def extract_external_client_version(comments):
 
 
 def _text_to_adf(text):
-    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()] or [text]
-    return [
-        {"type": "paragraph", "content": [{"type": "text", "text": p}]}
-        for p in paragraphs
-    ]
+    """Preserve Rally line breaks in Jira ADF (plain \\n is ignored in a paragraph)."""
+    text = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return [{"type": "paragraph", "content": [{"type": "text", "text": " "}]}]
+    blocks = []
+    for chunk in re.split(r"\n{2,}", text):
+        lines = chunk.split("\n")
+        content = []
+        for index, line in enumerate(lines):
+            if index:
+                content.append({"type": "hardBreak"})
+            if line:
+                content.append({"type": "text", "text": line})
+        if content:
+            blocks.append({"type": "paragraph", "content": content})
+    return blocks or [{"type": "paragraph", "content": [{"type": "text", "text": text}]}]
 
 
 def _adf_to_text(node):
@@ -57,9 +68,14 @@ def _comment_adf_body(text, heading=None):
 
 class ZDRClient:
     def __init__(self):
+        creds = config.current_credentials()
         self.base_url = f"https://{config.ZDR_SITE}/rest/api/3"
-        self.auth = HTTPBasicAuth(config.ZDR_JIRA_EMAIL, config.ZDR_JIRA_API_TOKEN)
+        self.auth = HTTPBasicAuth(creds["ZDR_JIRA_EMAIL"], creds["ZDR_JIRA_API_TOKEN"])
         self.headers = {"Content-Type": "application/json"}
+        self._http = requests.Session()
+        self._http.trust_env = False
+        self._http.auth = self.auth
+        self._http.headers.update(self.headers)
 
     def _build_jql(self, exclude_statuses=False):
         jql = f"project = {config.ZDR_PROJECT_KEY} AND {config.ZDR_JQL_SCOPE}"
@@ -78,9 +94,7 @@ class ZDRClient:
             body = {"jql": jql, "fields": fields, "maxResults": 100}
             if next_page_token:
                 body["nextPageToken"] = next_page_token
-            resp = requests.post(
-                f"{self.base_url}/search/jql", json=body, auth=self.auth, headers=self.headers
-            )
+            resp = self._http.post(f"{self.base_url}/search/jql", json=body)
             resp.raise_for_status()
             data = resp.json()
             for issue in data.get("issues", []):

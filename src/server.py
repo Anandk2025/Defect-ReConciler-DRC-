@@ -1,4 +1,6 @@
 import hmac
+import html
+import os
 import re
 from datetime import timedelta
 from urllib.parse import urlencode
@@ -10,38 +12,85 @@ from .ai_sync import check_comment_sync
 from .comment_sync import notice_for_results, sync_matched_pairs
 from .pipeline import create_zdr_from_rally, run_comparison
 from .rally_client import RallyClient
-from .report import build_html, build_login_html
+from .report import (
+    build_client_select_html,
+    build_connecting_html,
+    build_html,
+    build_login_html,
+    build_rally_session_html,
+    build_unconfigured_html,
+    created_all_notice,
+    created_ticket_notice,
+)
 from .sync_checks import check_defect_status, check_fix_eta
 from .zdr_client import ZDRClient, extract_external_client_version
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder=str(config.ROOT / "static"), static_url_path="/static")
 app.secret_key = config.DRC_SECRET_KEY or "dev-only-key-set-DRC_SECRET_KEY-in-.env-before-sharing"
 app.permanent_session_lifetime = timedelta(days=30)
 
 _PUBLIC_PATHS = {"/login"}
+_CLIENT_OPTIONAL_PATHS = {"/login", "/clients", "/logout"}
 
 
 @app.before_request
 def _require_login():
-    if not config.DRC_ACCESS_PASSWORD or request.path in _PUBLIC_PATHS:
+    config.bind_request_credentials(session.get("drc_credentials"))
+    if request.path.startswith("/static"):
         return None
-    if session.get("authenticated"):
+    if config.DRC_ACCESS_PASSWORD and request.path not in _PUBLIC_PATHS and not session.get("authenticated"):
+        return redirect("/login")
+    client_id = session.get("drc_client")
+    if client_id and not config.bind_request_client(client_id):
+        session.pop("drc_client", None)
+        client_id = None
+    if request.path in _CLIENT_OPTIONAL_PATHS:
         return None
-    return redirect("/login")
+    if not client_id:
+        return redirect("/clients")
+    if not config.client_is_configured() and request.path not in {"/", "/connecting"}:
+        if request.path.startswith("/api/"):
+            return (
+                jsonify({"error": f"DRC is not configured for {config.CLIENT_NAME}."}),
+                501,
+            )
+        return redirect("/")
+    return None
 
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if not config.DRC_ACCESS_PASSWORD:
-        return redirect("/")
+        return redirect("/clients")
     if request.method == "POST":
         password = request.form.get("password", "")
         if hmac.compare_digest(password, config.DRC_ACCESS_PASSWORD):
             session["authenticated"] = True
             session.permanent = bool(request.form.get("remember"))
-            return redirect("/")
+            return redirect("/clients")
         return build_login_html(error="Incorrect password."), 401
     return build_login_html()
+
+
+@app.route("/clients", methods=["GET", "POST"])
+def select_client():
+    if request.method == "POST":
+        client_id = (request.form.get("client_id") or "").strip()
+        if not config.bind_request_client(client_id):
+            return build_client_select_html(error="Select a client to continue."), 400
+        session["drc_client"] = client_id
+        session.modified = True
+        if config.client_is_configured():
+            return redirect("/connecting")
+        return redirect("/")
+    return build_client_select_html()
+
+
+@app.route("/connecting")
+def connecting():
+    if not config.client_is_configured():
+        return build_unconfigured_html()
+    return build_connecting_html()
 
 
 @app.route("/logout")
@@ -55,17 +104,22 @@ def logout():
 _recently_created = {}
 
 
+def _created_map():
+    return _recently_created.setdefault(config.current_client_id() or "_", {})
+
+
 def _reconcile_recently_created(result):
     """Jira's JQL search can take a few seconds to index a freshly created
     ticket, so a defect we just created a ZDR ticket for might still show up
     as "missing" on the very next comparison. Since we already know its key,
     move it into "matched" ourselves instead of waiting for the index."""
-    if not _recently_created:
+    if not _created_map():
         return
     still_missing = []
     zdr = None
+    created = _created_map()
     for d in result["missing_in_zdr"]:
-        zdr_key = _recently_created.get(d["id"])
+        zdr_key = created.get(d["id"])
         if not zdr_key:
             still_missing.append(d)
             continue
@@ -79,7 +133,7 @@ def _reconcile_recently_created(result):
             # missing so the "Create ZDR" option comes back, and drop the
             # stale tracking entry so we stop pretending it's valid.
             still_missing.append(d)
-            _recently_created.pop(d["id"], None)
+            _created_map().pop(d["id"], None)
             continue
         result["matched"].append(
             {"rally": d, "zdr": [{"key": zdr_key, "status": status, "summary": d["name"], "rally_id": d["id"]}]}
@@ -89,45 +143,36 @@ def _reconcile_recently_created(result):
 
 @app.route("/")
 def index():
+    if not config.client_is_configured():
+        return build_unconfigured_html()
     notice = None
     if request.args.get("created"):
-        attached = request.args.get("attached", "0")
-        message = (
-            f"Created ZDR ticket {request.args['created']} for Rally defect "
-            f"{request.args.get('rally_id', '')} ({attached} attachment(s) copied)."
+        notice = created_ticket_notice(
+            request.args.get("created"),
+            request.args.get("rally_id", ""),
+            request.args.get("attached", "0"),
+            request.args.get("error", ""),
         )
-        if request.args.get("error"):
-            message += " " + request.args["error"]
-        notice = ("success", message)
     elif request.args.get("created_all") is not None:
-        created_n = request.args.get("created_all", "0")
-        failed_n = request.args.get("failed", "0")
-        ids = request.args.get("ids", "")
-        message = f"Created {created_n} ZDR ticket(s)"
-        if ids:
-            message += f" ({ids})"
-        message += "."
-        if request.args.get("error"):
-            message += " " + request.args["error"]
-        notice = ("error" if failed_n not in ("", "0") else "success", message)
+        notice = created_all_notice(
+            request.args.get("created_all", "0"),
+            request.args.get("failed", "0"),
+            request.args.get("ids", ""),
+            request.args.get("error", ""),
+        )
     elif request.args.get("error"):
         notice = ("error", request.args["error"])
 
     try:
         rally_defects, zdr_defects, result = run_comparison()
     except SystemExit as e:
+        if _is_session_credentials_error(e):
+            return redirect("/rally-session")
         return f"<pre>{e}</pre>", 500
     except Exception as e:
-        message = str(e)
-        if "401" in message and "rallydev.com" in message:
-            return (
-                "<pre>Rally session has expired.\n\n"
-                "Whoever's on refresh duty: log into Rally in a browser, copy the "
-                "ZSESSIONID and JSESSIONID cookies from DevTools, and update "
-                "RALLY_ZSESSIONID / RALLY_JSESSIONID in .env, then restart the server.</pre>",
-                503,
-            )
-        return f"<pre>Failed to fetch comparison: {message}</pre>", 500
+        if _is_session_credentials_error(e):
+            return redirect("/rally-session")
+        return f"<pre>Failed to fetch comparison: {e}</pre>", 500
     _reconcile_recently_created(result)
 
     if request.args.get("refresh"):
@@ -137,9 +182,16 @@ def index():
             sync_notice = ("error", f"Failed to sync Rally discussions to ZDR: {e}")
         if sync_notice:
             if notice:
+                left_html = notice[1] if len(notice) > 2 and notice[2] == "html" else html.escape(notice[1])
+                right_html = (
+                    sync_notice[1]
+                    if len(sync_notice) > 2 and sync_notice[2] == "html"
+                    else html.escape(sync_notice[1])
+                )
                 notice = (
                     "error" if notice[0] == "error" or sync_notice[0] == "error" else "success",
-                    notice[1] + " " + sync_notice[1],
+                    left_html + right_html,
+                    "html",
                 )
             else:
                 notice = sync_notice
@@ -151,8 +203,10 @@ def index():
         refresh_url="/?refresh=1",
         enable_actions=True,
         notice=notice,
-        created_map=_recently_created,
+        created_map=_created_map(),
         show_logout=bool(config.DRC_ACCESS_PASSWORD),
+        rally_defects=rally_defects,
+        zdr_open=zdr_defects,
     )
 
 
@@ -166,7 +220,7 @@ def create_zdr(rally_id):
                 f"/?error=Rally defect {rally_id} is no longer in the missing list — it may already have a ZDR ticket."
             )
         zdr_key, attached, attach_errors = create_zdr_from_rally(defect)
-        _recently_created[rally_id] = zdr_key
+        _created_map()[rally_id] = zdr_key
     except Exception as e:
         return redirect(f"/?error=Failed to create ZDR ticket for {rally_id}: {e}")
     if attach_errors:
@@ -182,7 +236,7 @@ def create_all_zdrs():
     try:
         _, _, result = run_comparison()
         _reconcile_recently_created(result)
-        missing = [d for d in result["missing_in_zdr"] if d["id"] not in _recently_created]
+        missing = [d for d in result["missing_in_zdr"] if d["id"] not in _created_map()]
         if not missing:
             return redirect("/?error=There are no missing Rally defects to create ZDR tickets for.")
         rally_client = RallyClient()
@@ -195,7 +249,7 @@ def create_all_zdrs():
                 zdr_key, attached, attach_errors = create_zdr_from_rally(
                     defect, rally_client=rally_client, zdr_client=zdr_client
                 )
-                _recently_created[defect["id"]] = zdr_key
+                _created_map()[defect["id"]] = zdr_key
                 created.append(f"{defect['id']}→{zdr_key}")
                 if attach_errors:
                     attach_notes.append(f"{defect['id']}: {'; '.join(attach_errors)}")
@@ -381,8 +435,65 @@ def zdr_update_date(zdr_key):
     return jsonify({"date": date_str})
 
 
+def _is_session_credentials_error(exc):
+    if isinstance(exc, config.MissingCredentialsError):
+        return True
+    message = str(exc)
+    if any(
+        key in message
+        for key in ("RALLY_ZSESSIONID", "RALLY_JSESSIONID", "ZDR_JIRA_EMAIL", "ZDR_JIRA_API_TOKEN")
+    ):
+        return True
+    if "401" not in message:
+        return False
+    lower = message.lower()
+    return "rallydev.com" in lower or "atlassian.net" in lower
+
+
+def _session_form(error=None, status=None):
+    creds = config.current_credentials()
+    html_page = build_rally_session_html(
+        error=error,
+        jira_email=creds.get("ZDR_JIRA_EMAIL") or "",
+        has_rally=bool(creds.get("RALLY_ZSESSIONID") and creds.get("RALLY_JSESSIONID")),
+        has_jira_token=bool(creds.get("ZDR_JIRA_API_TOKEN")),
+    )
+    if status is None:
+        return html_page
+    return html_page, status
+
+
+@app.route("/rally-session", methods=["GET", "POST"])
+def rally_session():
+    creds = config.current_credentials()
+    if request.method == "GET":
+        return _session_form()
+    merged = {
+        "RALLY_ZSESSIONID": (request.form.get("zsessionid") or "").strip() or creds.get("RALLY_ZSESSIONID") or "",
+        "RALLY_JSESSIONID": (request.form.get("jsessionid") or "").strip() or creds.get("RALLY_JSESSIONID") or "",
+        "ZDR_JIRA_EMAIL": (request.form.get("jira_email") or "").strip() or creds.get("ZDR_JIRA_EMAIL") or "",
+        "ZDR_JIRA_API_TOKEN": (request.form.get("jira_api_token") or "").strip()
+        or creds.get("ZDR_JIRA_API_TOKEN")
+        or "",
+    }
+    try:
+        config.set_session_credentials(
+            merged["RALLY_ZSESSIONID"],
+            merged["RALLY_JSESSIONID"],
+            merged["ZDR_JIRA_EMAIL"],
+            merged["ZDR_JIRA_API_TOKEN"],
+        )
+    except ValueError as e:
+        return _session_form(error=str(e), status=400)
+    session["drc_credentials"] = merged
+    session.permanent = True
+    session.modified = True
+    return redirect("/connecting")
+
+
 def main():
-    app.run(host="0.0.0.0", port=5050, debug=False)
+    port = int(os.environ.get("PORT", "5050"))
+    app.run(host="0.0.0.0", port=port, debug=False)
 
 
 if __name__ == "__main__":

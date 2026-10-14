@@ -1,6 +1,8 @@
+import html
 import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 from . import config
 from .rally_client import RallyClient
@@ -19,6 +21,8 @@ _TAG_PREFIXES = (
     "latest comments from rally posted at",
     "latest comments from rally",
 )
+_RALLY_OBJECT_ID_RE = re.compile(r"/defect/(\d+)")
+_CREATE_ACK_RE = re.compile(r"has been created for zinnia analysis", re.I)
 
 
 def _normalize(text):
@@ -56,6 +60,19 @@ def _already_copied(rally_text, zdr_comments):
     return False
 
 
+def _is_drc_tagged(comment):
+    hay = _normalize(comment.get("text"))
+    return any(hay.startswith(prefix) for prefix in _TAG_PREFIXES)
+
+
+def _drc_tagged_comments(zdr_comments):
+    return [comment for comment in zdr_comments if _is_drc_tagged(comment)]
+
+
+def _is_create_ack(post):
+    return bool(_CREATE_ACK_RE.search(post.get("text") or ""))
+
+
 def _body_after_tag(hay):
     for prefix in _TAG_PREFIXES:
         if hay.startswith(prefix):
@@ -79,16 +96,30 @@ def format_discussion_line(post):
 
 
 def _new_posts_since_last_copied(posts, zdr_comments):
-    """Rally posts after the newest one already on ZDR. If none copied yet, the latest only."""
-    nonempty = [p for p in posts if (p.get("text") or "").strip()]
+    """Copy Rally posts after the last one DRC already tagged on ZDR.
+
+    Human ZDR comments are ignored for this checkpoint. If DRC has never
+    copied this ticket, only the latest Rally post is sent — not the thread.
+    """
+    nonempty = [
+        post
+        for post in posts
+        if (post.get("text") or "").strip() and not _is_create_ack(post)
+    ]
     if not nonempty:
         return []
+    tagged = _drc_tagged_comments(zdr_comments)
+    if not tagged:
+        return [nonempty[-1]]
     last_copied_idx = -1
     for i, post in enumerate(nonempty):
-        if _already_copied(post.get("text"), zdr_comments):
+        if _already_copied(post.get("text"), tagged):
             last_copied_idx = i
     if last_copied_idx == -1:
-        return [nonempty[-1]]
+        latest = nonempty[-1]
+        if _already_copied(latest.get("text"), tagged):
+            return []
+        return [latest]
     return nonempty[last_copied_idx + 1 :]
 
 
@@ -126,22 +157,25 @@ def pairs_from_matched(result):
         if key in seen:
             continue
         seen.add(key)
-        pairs.append(key)
+        pairs.append({"rally_id": rally_id, "zdr_key": zdr_key, "rally_ref": rally.get("ref") or ""})
     return pairs
 
 
 def _sync_one_pair(pair):
-    rally_id, zdr_key = pair
+    rally_id = pair["rally_id"]
+    zdr_key = pair["zdr_key"]
     try:
-        return sync_rally_discussion_to_zdr(rally_id, zdr_key)
+        result = sync_rally_discussion_to_zdr(rally_id, zdr_key)
     except Exception as e:
-        return {
+        result = {
             "status": "error",
             "rally_id": rally_id,
             "zdr_key": zdr_key,
             "count": 0,
             "error": str(e),
         }
+    result["rally_ref"] = pair.get("rally_ref") or ""
+    return result
 
 
 def sync_matched_pairs(result):
@@ -154,6 +188,32 @@ def sync_matched_pairs(result):
         return list(pool.map(_sync_one_pair, pairs))
 
 
+def _rally_href(rally_id, rally_ref=""):
+    match = _RALLY_OBJECT_ID_RE.search(rally_ref or "")
+    base = config.RALLY_BASE_URL.rstrip("/")
+    if match:
+        return f"{base}/#/detail/defect/{match.group(1)}"
+    return f"{base}/#/search?keywords={quote(str(rally_id))}"
+
+
+def _zdr_href(zdr_key):
+    return f"https://{config.ZDR_SITE}/browse/{quote(str(zdr_key), safe='-')}"
+
+
+def _pair_link_html(result):
+    rally_id = html.escape(str(result.get("rally_id") or ""))
+    zdr_key = html.escape(str(result.get("zdr_key") or ""))
+    rally_url = html.escape(_rally_href(result.get("rally_id"), result.get("rally_ref")), quote=True)
+    zdr_url = html.escape(_zdr_href(result.get("zdr_key")), quote=True)
+    return (
+        f'<div class="notice-pair">'
+        f'<a href="{rally_url}" target="_blank" rel="noopener">{rally_id}</a>'
+        f"-&gt;"
+        f'<a href="{zdr_url}" target="_blank" rel="noopener">{zdr_key}</a>'
+        f"</div>"
+    )
+
+
 def notice_for_results(results):
     if not results:
         return None
@@ -161,22 +221,29 @@ def notice_for_results(results):
     skipped = [r for r in results if r["status"] == "skipped"]
     no_comment = [r for r in results if r["status"] == "no_rally_comment"]
     errors = [r for r in results if r["status"] not in ("posted", "skipped", "no_rally_comment")]
-    parts = []
+    blocks = ['<div class="notice-title">Sync up details :</div>']
     if posted:
-        details = ", ".join(f"{r['rally_id']}→{r['zdr_key']}" for r in posted)
-        parts.append(f"Copied Rally comments to {len(posted)} ZDR ticket(s): {details}.")
-    if skipped:
-        parts.append(f"Skipped {len(skipped)} already in sync.")
-    if no_comment:
-        parts.append(f"{len(no_comment)} had no Rally discussion.")
-    if errors:
-        failed = "; ".join(
-            f"{r['rally_id']}→{r['zdr_key']}: {r.get('error') or 'unknown error'}" for r in errors
+        blocks.append(
+            f'<div class="notice-block">Copied Rally Comments to ZDRs Tickets: {len(posted)}'
+            + "".join(_pair_link_html(r) for r in posted)
+            + "</div>"
         )
-        parts.append(f"Failed ({len(errors)}): {failed}.")
-    if not parts:
+    if skipped:
+        blocks.append(
+            f'<div class="notice-block">Skipped {len(skipped)} Defects as already in Sync: {len(skipped)}</div>'
+        )
+    if no_comment:
+        blocks.append(
+            f'<div class="notice-block">{len(no_comment)} had no Rally discussion.</div>'
+        )
+    if errors:
+        failed = "".join(
+            _pair_link_html(r)
+            + f'<div class="notice-error">{html.escape(r.get("error") or "unknown error")}</div>'
+            for r in errors
+        )
+        blocks.append(f'<div class="notice-block">Failed ({len(errors)}):{failed}</div>')
+    if len(blocks) == 1:
         return None
-    kind = "error" if errors and not posted else "success"
-    if errors and posted:
-        kind = "error"
-    return (kind, " ".join(parts))
+    kind = "error" if errors else "success"
+    return (kind, "".join(blocks), "html")

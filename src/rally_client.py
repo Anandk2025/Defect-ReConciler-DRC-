@@ -9,6 +9,33 @@ from . import config
 _TAG_RE = re.compile(r"<[^>]+>")
 _IMG_RE = re.compile(r'(?i)<img[^>]*\ssrc="([^"]*)"[^>]*>')
 _SECURITY_TOKEN_RE = re.compile(r'name="SecurityToken" content="([^"]+)"')
+_OL_RE = re.compile(r"(?is)<ol[^>]*>(.*?)</ol>")
+_UL_RE = re.compile(r"(?is)<ul[^>]*>(.*?)</ul>")
+_LI_RE = re.compile(r"(?is)<li[^>]*>(.*?)</li>")
+_BLOCK_CLOSE_RE = re.compile(r"(?i)</(div|h[1-6]|tr|table|blockquote|pre|section|article)>")
+_BLOCK_OPEN_RE = re.compile(r"(?i)<(div|p|h[1-6]|tr|table|blockquote|pre|section|article)[^>]*>")
+
+
+def _strip_html_tags(value):
+    text = re.sub(r"(?i)<br\s*/?>", "\n", value or "")
+    text = re.sub(r"(?i)</p>", "\n\n", text)
+    text = _BLOCK_CLOSE_RE.sub("\n", text)
+    text = _BLOCK_OPEN_RE.sub("", text)
+    text = _TAG_RE.sub("", text)
+    text = html_unescape(text).replace("\xa0", " ")
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _list_items_html(inner, ordered):
+    lines = []
+    for index, item in enumerate(_LI_RE.findall(inner or ""), 1):
+        body = " ".join(_strip_html_tags(item).split())
+        if not body:
+            continue
+        lines.append(f"{index}. {body}" if ordered else f"• {body}")
+    return "\n".join(lines)
 
 
 def _html_to_text(value):
@@ -18,19 +45,19 @@ def _html_to_text(value):
     # attachment API doesn't expose the media id ADF embedding needs) — leave
     # a marker with the filename so the reader knows to check the attachments.
     text = _IMG_RE.sub(lambda m: f"[Screenshot attached: {m.group(1).rsplit('/', 1)[-1]}]", value)
-    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
-    text = re.sub(r"(?i)</p>", "\n\n", text)
-    text = _TAG_RE.sub("", text)
-    text = html_unescape(text)
-    return text.strip()
+    text = _OL_RE.sub(lambda m: "\n" + _list_items_html(m.group(1), True) + "\n\n", text)
+    text = _UL_RE.sub(lambda m: "\n" + _list_items_html(m.group(1), False) + "\n\n", text)
+    return _strip_html_tags(text)
 
 
 class RallyClient:
     def __init__(self):
-        self.base_url = config.RALLY_BASE_URL.rstrip("/")
+        creds = config.current_credentials()
+        self.base_url = (config.RALLY_BASE_URL or "").rstrip("/")
         self.session = requests.Session()
-        self.session.cookies.set("ZSESSIONID", config.RALLY_ZSESSIONID)
-        self.session.cookies.set("JSESSIONID", config.RALLY_JSESSIONID)
+        self.session.trust_env = False
+        self.session.cookies.set("ZSESSIONID", creds["RALLY_ZSESSIONID"])
+        self.session.cookies.set("JSESSIONID", creds["RALLY_JSESSIONID"])
         self.session.headers.update({"Content-Type": "application/json"})
         self._project_ref = None
         self._security_token = None

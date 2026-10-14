@@ -76,7 +76,15 @@ def compare(csv_out, html_out, open_html):
     if html_out:
         os.makedirs(os.path.dirname(html_out) or ".", exist_ok=True)
         with open(html_out, "w") as f:
-            f.write(build_html(result, len(rally_defects), len(zdr_defects)))
+            f.write(
+                build_html(
+                    result,
+                    len(rally_defects),
+                    len(zdr_defects),
+                    rally_defects=rally_defects,
+                    zdr_open=zdr_defects,
+                )
+            )
         abs_path = os.path.abspath(html_out)
         click.echo(f"\nWrote HTML report to {abs_path}")
         if open_html:

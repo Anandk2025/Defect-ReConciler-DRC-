@@ -6,6 +6,11 @@ from .zdr_client import ZDRClient
 
 def run_comparison(on_progress=None):
     config.require_credentials()
+    alm_kind = (config.CLIENT_ALM_KIND or "rally").strip().lower()
+    if alm_kind != "rally":
+        raise RuntimeError(
+            f"{config.CLIENT_NAME} uses {config.CLIENT_ALM_NAME}, which DRC does not sync yet."
+        )
 
     def notify(msg):
         if on_progress:

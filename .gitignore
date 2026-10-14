@@ -6,3 +6,5 @@ reports/*.csv
 reports/*.html
 .DS_Store
 .claude/
+drc-deployhub.zip
+.idea/
